@@ -8,6 +8,8 @@ from torch.utils.data import DataLoader
 import torch
 import torch.nn as nn 
 import numpy as np
+from tqdm import tqdm
+import time
 
 from utils.preprocess import load_graphs, get_context_pairs, get_evaluation_data, get_evaluation_classification_data
 from utils.minibatch import MyDataset
@@ -23,7 +25,7 @@ from utils1 import (
     set_random_seed # For reproducibility
 )
 
-set_random_seed(0)
+# set_random_seed(0)
 
 torch.autograd.set_detect_anomaly(True) # Keep for debugging
 
@@ -100,9 +102,11 @@ if __name__ == "__main__":
     parser.add_argument('--learning_rate', type=float, default=0.008)
     parser.add_argument('--weight_decay', type=float, default=0.0003)
     parser.add_argument('--window', type=int, default=-1)
+    parser.add_argument('--seed', type=int, default=0)
     
     args = parser.parse_args()
     print(args)
+    set_random_seed(args.seed)
 
     # Setup device
     if torch.cuda.is_available() and args.GPU_ID >= 0:
@@ -111,8 +115,12 @@ if __name__ == "__main__":
         device = torch.device("cpu")
     args.device = device 
     print(f"Using device: {device}")
+    time_start = time.time() # Start time for trainin
+    model_save_dir = "./model_checkpoints"
+    os.makedirs(model_save_dir, exist_ok=True)
 
     # Load structural role data (Pandas DataFrame from .pkl)
+    print("Loading role data...")
     role_file_prefix = args.dataset # e.g. DBLP3
     role_path = f'./data/{args.dataset}/{role_file_prefix}_wl_nc.pkl'
 
@@ -159,7 +167,7 @@ if __name__ == "__main__":
     Role_set, Cross_role_Set = hypergraph_role_set(train_role_graph_df, args.time_steps)
     H_prev_ts_roles = None # To store H from gen_attribute_hg of t-1
 
-    set_random_seed(0)
+    # set_random_seed(0)
     for i in range(args.time_steps):
         if i not in train_role_graph_df: # Handle missing timesteps in role data
             # Append placeholder sparse tensors if a timestep is missing
@@ -300,7 +308,8 @@ if __name__ == "__main__":
     for epoch in range(args.epochs):
         model.train()
         epoch_loss_list = []
-        for feed_dict_batch in dataloader:
+        # for feed_dict_batch in dataloader:
+        for feed_dict_batch in tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}"):
             opt.zero_grad()
             # RTGCN.get_loss expects data (Data_dblp), hypergraph_lap, cross_role_inc, cross_role_lap
             loss = model.get_loss(feed_dict_batch, 
@@ -309,7 +318,7 @@ if __name__ == "__main__":
                                   cross_role_hyper_incidences, 
                                   cross_role_laplacians, 
                                   list_loss_role)
-            print('Loss:', loss.item()) # Debugging print, can be removed later
+            # print('Loss:', loss.item()) # Debugging print, can be removed later
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"Epoch {epoch}, NaN/Inf loss detected. Stopping training.")
                 epoch_loss_list.append(float('inf'))
@@ -407,3 +416,6 @@ if __name__ == "__main__":
 
     else:
         print("No best model found (e.g., training did not run or complete).")
+        
+    end_time = time.time()
+    print(f"Training and evaluation completed in {end_time - time_start:.2f} seconds.")

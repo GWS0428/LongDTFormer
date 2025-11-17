@@ -42,141 +42,116 @@ class RTGCNRoleSep(nn.Module):
         self.act = act
         self.output_dim = output_dim
         self.input_dim = input_dim
-        self.hidden_dim =hidden_dim
+        self.hidden_dim=hidden_dim
         self.num_time_steps = time_step
-        self.neg_weight = neg_weight
-        self.attn_drop = attn_drop
-        self.residual = residual
-        self.role_num = role_num
-        self.cross_role_num = cross_role_num
+        self.neg_weight=neg_weight
+        # self.attn_drop = attn_drop # Stored but not directly used below
+        # self.residual = residual # Stored but not directly used below
+        self.role_num=role_num # Stored but not directly used below
+        self.cross_role_num=cross_role_num # Stored but not directly used below
         self.bceloss=BCEWithLogitsLoss()
-        
-        
-        # Define separate initial weight parameters for GCN and HyperGNN layers #### updated
-        self.gcn_weight1 = nn.Parameter(torch.randn(self.input_dim, self.hidden_dim)) #### updated
-        self.gcn_weight2 = nn.Parameter(torch.randn(self.hidden_dim, self.output_dim)) #### updated
-        self.hyper_weight1 = nn.Parameter(torch.randn(self.input_dim, self.hidden_dim)) #### updated
-        self.hyper_weight2 = nn.Parameter(torch.randn(self.hidden_dim, self.output_dim)) #### updated
-        
-        # Define separate GRU cells for each weight matrix #### updated
-        self.evolve_weights = nn.ModuleList() #### updated
-        self.evolve_weights.append(MatGRUCell(n_node, self.input_dim, self.hidden_dim, cross_role_num)) # Evolves gcn_weight1 #### updated
-        self.evolve_weights.append(MatGRUCell(n_node, self.hidden_dim, self.output_dim, cross_role_num)) # Evolves gcn_weight2 #### updated
-        self.evolve_weights.append(MatGRUCell(n_node, self.input_dim, self.hidden_dim, cross_role_num)) # Evolves hyper_weight1 #### updated
-        self.evolve_weights.append(MatGRUCell(n_node, self.hidden_dim, self.output_dim, cross_role_num)) # Evolves hyper_weight2 #### updated
-        
-        self.gcn = GCN(self.input_dim, self.hidden_dim, self.output_dim, self.attn_drop, concat=False) # attn_drop is not used #### updated
-        self.hypergnn = nn.ModuleList() #### updated
-        self.hypergnn.append(HyperGNN(self.input_dim, self.hidden_dim))
-        self.hypergnn.append(HyperGNN(self.hidden_dim, self.output_dim))
+        # self.var = {} # This was unused
 
-        self.loss_weight = loss_weight
-        self.emb_weight = nn.Parameter(torch.ones(1)) # Alpha in Eq 7 #### updated
-        self.emb_cross_weight = nn.Parameter(torch.ones(1)) # Gamma in Eq 7 #### updated
-        
-        # self.var = {}
-        # self.hypergnn=nn.ModuleList()
-        # self.hypergnn.append(HyperGNN(input_dim,hidden_dim))
-        # self.hypergnn.append(HyperGNN(hidden_dim, output_dim))
+        # HyperGNN layers (input -> hidden, hidden -> output)
+        self.hypergnn_layers = nn.ModuleList() ### updated (renamed for clarity)
+        self.hypergnn_layers.append(HyperGNN(input_dim, hidden_dim)) ### updated
+        self.hypergnn_layers.append(HyperGNN(hidden_dim, output_dim)) ### updated
 
-        # self.gcn=GCN(input_dim,hidden_dim,output_dim,self.attn_drop,concat=False)
-        # self.evolve_weights=nn.ModuleList()
-        # self.evolve_weights.append(MatGRUCell( n_node,input_dim, hidden_dim,cross_role_num))
-        # self.evolve_weights.append(MatGRUCell(n_node, hidden_dim, output_dim, cross_role_num))
+        # GCN model
+        # Pass attn_drop to GCN if it's intended for dropout within GCN layers
+        self.gcn_model = GCN(input_dim, hidden_dim, output_dim, attn_drop, concat=False) ### updated (renamed for clarity)
         
-        # self.weight_var1 = nn.Parameter(torch.randn(self.input_dim,  self.hidden_dim))
-        # self.weight_var2 = nn.Parameter(torch.randn(self.hidden_dim,  self.output_dim))
+        # GRUs for evolving weights
+        # We need GRUs for GCN's W1, GCN's W2, HyperGNN's W1, HyperGNN's W2
+        self.evolve_gcn_w1 = MatGRUCell(n_node, input_dim, hidden_dim, cross_role_num) ### updated
+        self.evolve_gcn_w2 = MatGRUCell(n_node, hidden_dim, output_dim, cross_role_num) ### updated
+        self.evolve_hyper_w1 = MatGRUCell(n_node, input_dim, hidden_dim, cross_role_num) ### updated
+        self.evolve_hyper_w2 = MatGRUCell(n_node, hidden_dim, output_dim, cross_role_num) ### updated
         
-        # self.loss_weight=loss_weight
-        # self.emb_weight=nn.Parameter(torch.ones(1))
-        # self.emb_cross_weight = nn.Parameter(torch.ones(1))
+        # Initial Weight Parameters (distinct for GCN and HyperGNN)
+        # GCN weights
+        self.gcn_weight_var1 = nn.Parameter(torch.randn(self.input_dim, self.hidden_dim)) ### updated
+        self.gcn_weight_var2 = nn.Parameter(torch.randn(self.hidden_dim, self.output_dim)) ### updated
+        # HyperGNN weights
+        self.hyper_weight_var1 = nn.Parameter(torch.randn(self.input_dim, self.hidden_dim)) ### updated
+        self.hyper_weight_var2 = nn.Parameter(torch.randn(self.hidden_dim, self.output_dim)) ### updated
+        
+        self.loss_weight=loss_weight # For role loss
+        self.emb_weight_hyper = nn.Parameter(torch.ones(1)) ### updated (renamed for clarity: hyper contribution)
+        self.emb_weight_cross_role = nn.Parameter(torch.ones(1)) ### updated (renamed for clarity: cross-role contribution)
 
 
-    def forward(self, data, train_hypergraph,cross_role_hyper,cross_role_laplacian):
+    def forward(self, data, train_hypergraph_laplacians, cross_role_hyper_incidences, cross_role_laplacians):
         """
         Forward pass of the RTGCN, processing input through both graph and hypergraph components, and combining outputs.
         """
-        
-        # Unpack data inputs: features, edge_indices, sparse_adj_matrices #### updated
-        features_list = data[0] #### updated # List of features per time step [T, N, F_in]
-        edge_index_list = data[1] #### updated # List of edge_indices per time step [T, 2, E]
-        adj_matrix_list = data[2] #### updated # List of sparse adj matrices per time step [T, N, N]
+        node_features_list = data[0] 
+        edge_indices_list = data[1] 
+        adj_matrices_list = data[2] 
 
-        # Unpack hypergraph inputs: current_laplacian, cross_role_combined_H, cross_role_H1_laplacian #### updated
-        current_hypergraph_laplacian_list = train_hypergraph #### updated # List of current hypergraph laplacians [T, N, N]
-        cross_role_hyper_list = cross_role_hyper #### updated # List of cross-role combined H matrices [T-1, N, C_role_num]
-        cross_role_laplacian_list = cross_role_laplacian #### updated # List of cross-role H1 laplacians [T-1, N, N]
+        embeds = []
 
-        embeds = [] # List to store node embeddings for each time step
+        # Initialize weights for t=0
+        current_gcn_w1 = self.gcn_weight_var1 
+        current_gcn_w2 = self.gcn_weight_var2 
+        current_hyper_w1 = self.hyper_weight_var1 
+        current_hyper_w2 = self.hyper_weight_var2 
 
-        # Initialize current weights with the learnable parameters #### updated
-        gcn_w1 = self.gcn_weight1 #### updated
-        gcn_w2 = self.gcn_weight2 #### updated
-        hyper_w1 = self.hyper_weight1 #### updated
-        hyper_w2 = self.hyper_weight2 #### updated
+        # --- Timestep t=0 ---
+        features_t0 = node_features_list[0] 
+        edge_index_t0 = edge_indices_list[0] 
+        role_hyper_laplacian_t0 = train_hypergraph_laplacians[0] 
 
-        # Process Time Step 0 (index 0) #### updated
-        # Use initial learnable weights
-        input_att_t0 = features_list[0] #### updated
-        input_edge_t0 = edge_index_list[0] #### updated
-        input_hypergraph_t0 = current_hypergraph_laplacian_list[0] #### updated
+        # GCN at t=0
+        output_gcn_t0 = self.gcn_model(features_t0, edge_index_t0, current_gcn_w1, current_gcn_w2) 
 
-        # gcn at t=0 #### updated
-        gnn_output_t0 = self.gcn(input_att_t0, input_edge_t0, gcn_w1, gcn_w2) #### updated
+        # HyperGNN (role-based) at t=0
+        hidden_hyper_t0 = self.hypergnn_layers[0](features_t0, role_hyper_laplacian_t0, current_hyper_w1) 
+        output_hyper_role_t0 = self.hypergnn_layers[1](hidden_hyper_t0, role_hyper_laplacian_t0, current_hyper_w2) 
+        output_hyper_role_t0 = F.log_softmax(output_hyper_role_t0, dim=1)
 
-        # hypergraph at t=0 (only current roles used as per original code) #### updated
-        # Original code applied HyperGNN twice with different weights. Replicating this structure.
-        hyper_output_t0 = self.hypergnn[0](input_att_t0, input_hypergraph_t0, hyper_w1) #### updated
-        hyper_output_t0 = self.hypergnn[1](hyper_output_t0, input_hypergraph_t0, hyper_w2) #### updated
-        hyper_output_t0 = F.log_softmax(hyper_output_t0, dim=1) #### updated
+        # Combined embedding at t=0
+        output_t0 = output_gcn_t0 + self.emb_weight_hyper * output_hyper_role_t0 
+        embeds.append(output_t0)
 
-        # Combine outputs at t=0 #### updated
-        output_t0 = gnn_output_t0 + self.emb_weight * hyper_output_t0 #### updated
+        # --- Timesteps t=1 to T-1 ---
+        for i in range(1, self.num_time_steps): # Original was range(1, len(train_hypergraph_laplacians))
+            features_ti = node_features_list[i] 
+            edge_index_ti = edge_indices_list[i] 
+            adj_matrix_for_gru_ti = adj_matrices_list[i] 
+            
+            role_hyper_laplacian_ti = train_hypergraph_laplacians[i] 
+            
+            H_incident_for_gru = cross_role_hyper_incidences[i-1] 
 
-        # Add to embeddings list #### updated
-        embeds.append(output_t0) #### updated
 
+            # Evolve weights using their respective GRUs
+            current_gcn_w1 = self.evolve_gcn_w1(adj_matrix_for_gru_ti, current_gcn_w1, H_incident_for_gru) 
+            current_gcn_w2 = self.evolve_gcn_w2(adj_matrix_for_gru_ti, current_gcn_w2, H_incident_for_gru) 
+            current_hyper_w1 = self.evolve_hyper_w1(adj_matrix_for_gru_ti, current_hyper_w1, H_incident_for_gru) 
+            current_hyper_w2 = self.evolve_hyper_w2(adj_matrix_for_gru_ti, current_hyper_w2, H_incident_for_gru) 
 
-        # Process subsequent Time Steps (index 1 to time_steps - 1) #### updated
-        # These steps involve GRU-based weight evolution
-        for i in range(1, self.num_time_steps):
-            # Load model inputs for current time step i #### updated
-            input_att_ti = features_list[i] #### updated
-            input_edge_ti = edge_index_list[i] #### updated
-            adj_matrix_ti = adj_matrix_list[i] #### updated
-            input_hypergraph_ti = current_hypergraph_laplacian_list[i] #### updated # Current hypergraph Laplacian at time i
+            # GCN at timestep i
+            output_gcn_ti = self.gcn_model(features_ti, edge_index_ti, current_gcn_w1, current_gcn_w2) 
 
-            # Note: cross_role_hyper/laplacian lists have size T-1, indexed i-1 #### updated
-            input_cross_hypergraph_ti = cross_role_hyper_list[i-1] #### updated # Cross-role combined H+H1 for GRU
-            input_cross_laplacian_ti = cross_role_laplacian_list[i-1] #### updated # Cross-role H1 Laplacian for HyperGNN layer 2
+            # HyperGNN (role-based) at timestep i
+            hidden_hyper_ti = self.hypergnn_layers[0](features_ti, role_hyper_laplacian_ti, current_hyper_w1) 
+            output_hyper_role_ti = self.hypergnn_layers[1](hidden_hyper_ti, role_hyper_laplacian_ti, current_hyper_w2) 
+            output_hyper_role_ti = F.log_softmax(output_hyper_role_ti, dim=1)
+            
+            features_tm1 = node_features_list[i-1] 
+            prev_cross_role_laplacian = cross_role_laplacians[i-1] 
 
-            # Update weights using separate GRU cells for each weight #### updated
-            gcn_w1 = self.evolve_weights[0](adj_matrix_ti, gcn_w1, input_cross_hypergraph_ti) #### updated
-            gcn_w2 = self.evolve_weights[1](adj_matrix_ti, gcn_w2, input_cross_hypergraph_ti) #### updated
-            hyper_w1 = self.evolve_weights[2](adj_matrix_ti, hyper_w1, input_cross_hypergraph_ti) #### updated
-            hyper_w2 = self.evolve_weights[3](adj_matrix_ti, hyper_w2, input_cross_hypergraph_ti) #### updated
+            hidden_hyper_cross_ti = self.hypergnn_layers[0](features_tm1, prev_cross_role_laplacian, current_hyper_w1) # Re-use evolved hyper_w1 
+            output_hyper_cross_ti = self.hypergnn_layers[1](hidden_hyper_cross_ti, prev_cross_role_laplacian, current_hyper_w2) # Re-use evolved hyper_w2 
+            output_hyper_cross_ti = F.log_softmax(output_hyper_cross_ti, dim=1)
 
-            # gcn at time i using evolved weights #### updated
-            gnn_output_ti = self.gcn(input_att_ti, input_edge_ti, gcn_w1, gcn_w2) #### updated
-
-            # hypergraph at time i using evolved weights #### updated
-            # Original code applied HyperGNN twice. Replicating this structure.
-            hyper_out_ti_step1 = self.hypergnn[0](input_att_ti, input_hypergraph_ti, hyper_w1) #### updated
-            hyper_out_ti = self.hypergnn[1](hyper_out_ti_step1, input_hypergraph_ti, hyper_w2) #### updated
-            hyper_out_ti = F.log_softmax(hyper_out_ti, dim=1) #### updated
-
-            # cross_role graph at time i using evolved weights #### updated
-            # Note: This uses features from t-1 (data[0][i-1]) and Laplacian from cross_role_laplacian_list[i-1]
-            # This corresponds to the H1 hypergraph (transitions t-1 -> t) as per train.py comment
-            output3_ti_step1 = self.hypergnn[0](features_list[i-1], input_cross_laplacian_ti, hyper_w1) #### updated
-            output3_ti = self.hypergnn[1](output3_ti_step1, input_cross_laplacian_ti, hyper_w2) #### updated
-            output3_ti = F.log_softmax(output3_ti, dim=1) #### updated
-
-            # Concatenate/combine outputs from three types of graphs as node embeddings for time i #### updated
-            output_ti = gnn_output_ti + self.emb_weight * hyper_out_ti + self.emb_cross_weight * output3_ti #### updated
+            # Combined embedding at timestep i
+            output_ti = output_gcn_ti + \
+                        self.emb_weight_hyper * output_hyper_role_ti + \
+                        self.emb_weight_cross_role * output_hyper_cross_ti 
             embeds.append(output_ti)
 
-        # Return a list of node embeddings, one tensor per time step [T, N, F_out] #### updated
         return embeds
 
     def get_loss(self, feed_dict ,data_dblp,train_hypergraph,cross_role_hyper,cross_role_laplacian,list_loss_role):
@@ -332,7 +307,11 @@ class HyperGNN(nn.Module):
         Returns:
             Tensor: Updated node embeddings.
         """
-        rs = hyp_graph @ torch.matmul( node_initial_emb,W)
+        # rs = hyp_graph @ torch.matmul( node_initial_emb,W)
+        hyp_graph_dense = hyp_graph.to_dense()
+        node_emb_transformed = torch.matmul(node_initial_emb, W)
+        rs = torch.matmul(hyp_graph_dense, node_emb_transformed)
+        
         rs = (1-self.alpha)*self.proj(node_initial_emb)+rs*self.alpha
         return rs
 
@@ -435,8 +414,14 @@ class MatGRUGate(torch.nn.Module):
         Returns:
             Tensor: Output of the gate after applying the activation function.
         """
-        temp = adj.matmul(self.W)
-        temp1=incident_matrix.matmul(self.W1)
+        # temp = adj.matmul(self.W)
+        # temp1=incident_matrix.matmul(self.W1)
+        adj_dense = adj.to_dense()
+        temp = torch.matmul(adj_dense, self.W)
+
+        incident_matrix_dense = incident_matrix.to_dense()
+        temp1 = torch.matmul(incident_matrix_dense, self.W1)
+        
         if self.transform == True:
             out = self.activation(self.P.matmul(temp) +self.P.matmul(temp1)+ hidden.matmul(self.U) + self.bias)
         else:

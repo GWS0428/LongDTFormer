@@ -12,10 +12,10 @@ from tqdm import tqdm
 import time
 
 from utils.preprocess import load_graphs, get_context_pairs, get_evaluation_data, get_evaluation_classification_data
-from utils.minibatch import MyDatasetRole
+from utils.minibatch import MyDataset
 from utils.utilities import to_device 
 from eval.link_prediction import evaluate_classifier
-from models.model import RTGCN 
+from models.model_role_aware_wep_weights_smoe import RTGCNSMoE
 from utils1 import ( 
     gen_attribute_hg, 
     cross_role_hypergraphn_nodes, 
@@ -272,15 +272,15 @@ if __name__ == "__main__":
 
 
     # Build DataLoader and Model
-    dataset = MyDatasetRole(args, graphs_repr, raw_features_list, raw_adjs_np_list, context_pairs_train)
+    dataset = MyDataset(args, graphs_repr, raw_features_list, raw_adjs_np_list, context_pairs_train)
     dataloader = DataLoader(dataset,
                             batch_size=args.batch_size,
                             shuffle=True,
                             num_workers=0, # Set to >0 for parallel data loading if beneficial
-                            collate_fn=MyDatasetRole.collate_fn,
+                            collate_fn=MyDataset.collate_fn,
                             pin_memory=False)
     
-    model = RTGCN(act=nn.ELU(),
+    model = RTGCNSMoE(act=nn.ELU(),
                   n_node=args.node_num,
                   input_dim=args.input_dim,
                   output_dim=args.output_dim,
